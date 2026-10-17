@@ -23,7 +23,6 @@ export async function buildRecap(stationId, month) {
             COALESCE(SUM(s.qty) FILTER (WHERE p.sale_type = 'metered'),0) AS litres,
             COALESCE(SUM(s.qty) FILTER (WHERE p.sale_type <> 'metered'),0) AS units,
             COALESCE(SUM(s.amount) FILTER (WHERE s.source = 'order'),0) AS order_revenue,
-            COALESCE(SUM(s.amount) FILTER (WHERE s.payment = 'credit'),0) AS credit_sales,
             COALESCE(SUM(s.amount - s.qty * p.cost_price) FILTER (WHERE p.cost_price IS NOT NULL),0) AS profit_known,
             COALESCE(SUM(s.amount) FILTER (WHERE p.cost_price IS NOT NULL),0) AS revenue_with_cost
        ${SALE_SCOPE}`, p);
@@ -55,8 +54,6 @@ export async function buildRecap(stationId, month) {
   const orders = await one(
     `SELECT COUNT(*)::int AS count, COALESCE(SUM(total),0) AS value FROM orders
       WHERE station_id = $1 AND status = 'completed' AND updated_at >= $2 AND updated_at < $3`, p);
-  const owed = await one(
-    `SELECT COALESCE(SUM(CASE WHEN type = 'payment' THEN -amount ELSE amount END),0) AS total FROM credit_entries WHERE station_id = $1 AND NOT voided`, [stationId]);
 
   const prevKey = prevMonth(month);
   const pr = monthRange(prevKey, tz);
@@ -69,7 +66,7 @@ export async function buildRecap(stationId, month) {
     month, station: { name: station.name, currency: station.currency, timezone: tz },
     period: { start, end },
     totals: {
-      revenue, litres: Number(totals.litres), units: Number(totals.units), order_revenue: Number(totals.order_revenue), credit_sales: Number(totals.credit_sales),
+      revenue, litres: Number(totals.litres), units: Number(totals.units), order_revenue: Number(totals.order_revenue),
       expenses: expenseTotal, gross_profit_estimate: profitKnown,
       profit_coverage_pct: revenue > 0 ? Math.round((Number(totals.revenue_with_cost) / revenue) * 100) : 0,
       net_after_expenses: profitKnown - expenseTotal,
@@ -86,7 +83,6 @@ export async function buildRecap(stationId, month) {
     restocks: { count: restocks.count, value: Number(restocks.value) },
     losses: { count: losses.count, value: Number(losses.value) },
     orders: { count: orders.count, value: Number(orders.value) },
-    credit_outstanding: Number(owed.total),
     generated_at: new Date().toISOString(),
   };
 }
@@ -126,7 +122,6 @@ export function recapPdf(data) {
     line('Fuel sold (litres)', fmtNum(t.litres));
     line('Other items sold (units)', fmtNum(t.units));
     line('Online orders completed', `${data.orders.count} (${money(data.orders.value)})`);
-    line('Sales on credit', money(t.credit_sales));
     line('Expenses', money(t.expenses));
     if (t.profit_coverage_pct > 0) {
       line(`Gross profit estimate (${t.profit_coverage_pct}% of sales have a cost price)`, money(t.gross_profit_estimate));
@@ -143,7 +138,6 @@ export function recapPdf(data) {
     if (data.shifts.still_open) line('Shifts not yet closed', data.shifts.still_open);
     line('Stock losses and adjustments', `${data.losses.count} (${money(data.losses.value)})`);
     line('Restocks received', `${data.restocks.count} (${money(data.restocks.value)})`);
-    line('Owed by credit customers now', money(data.credit_outstanding));
     doc.moveDown();
 
     const table = (title, rows, cols) => {
@@ -172,12 +166,11 @@ export async function recapXlsx(data) {
   [
     ['Station', data.station.name], ['Month', data.month], ['Total sales', t.revenue], ['Fuel sold (litres)', t.litres],
     ['Other items sold (units)', t.units], ['Online orders', data.orders.count], ['Online order value', data.orders.value],
-    ['Sales on credit', t.credit_sales], ['Expenses', t.expenses], ['Gross profit estimate', t.gross_profit_estimate],
+    ['Expenses', t.expenses], ['Gross profit estimate', t.gross_profit_estimate],
     ['Share of sales with a cost price (%)', t.profit_coverage_pct], ['Estimated profit after expenses', t.net_after_expenses],
     ['Last month sales', t.previous_revenue], ['Change vs last month (%)', t.change_pct],
     ['Shifts closed', data.shifts.count], ['Shifts with flags', data.shifts.flagged], ['Cash shortages', data.shifts.shortages],
-    ['Cash surpluses', data.shifts.surpluses], ['Stock losses', data.losses.value], ['Restock value', data.restocks.value],
-    ['Owed by credit customers', data.credit_outstanding],
+    ['Cash surpluses', data.shifts.surpluses], ['Stock losses', data.losses.value], ['Restock value', data.restocks.value]
   ].forEach((r) => sum.addRow(r));
   sum.getColumn(1).font = { bold: true };
   const add = (name, cols, rows) => {

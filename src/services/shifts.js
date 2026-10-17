@@ -25,6 +25,7 @@ export async function pendingReadings(client, shiftId) {
 
 export async function startShift(client, ctx, pumpsInput) {
   const user = ctx.user;
+  if (user.role !== 'staff') throw bad('Shifts are for attendants. Admins do not need to start a shift.');
   const open = await client.query("SELECT id FROM shifts WHERE user_id = $1 AND status = 'open'", [user.id]);
   if (open.rows[0]) throw bad('You already have an open shift. Close it before starting a new one.');
   const { rows: [shift] } = await client.query(
@@ -186,16 +187,13 @@ export async function closeShift(client, ctx, shiftId, body, { adminClose = fals
   const sums = await client.query(
     `SELECT
        COALESCE(SUM(amount) FILTER (WHERE source = 'pump'), 0) AS pump_sales,
-       COALESCE(SUM(amount) FILTER (WHERE source <> 'pump' AND payment <> 'credit'), 0) AS manual_sales,
-       COALESCE(SUM(amount) FILTER (WHERE payment = 'credit'), 0) AS credit_sales
+       COALESCE(SUM(amount) FILTER (WHERE source <> 'pump'), 0) AS manual_sales
        FROM sales WHERE shift_id = $1 AND NOT voided`, [shift.id]);
-  const { rows: [cp] } = await client.query(
-    "SELECT COALESCE(SUM(amount),0) AS total FROM credit_entries WHERE shift_id = $1 AND type = 'payment' AND NOT voided", [shift.id]);
   const { rows: [ex] } = await client.query(
     'SELECT COALESCE(SUM(amount),0) AS total FROM expenses WHERE shift_id = $1 AND from_till AND NOT voided', [shift.id]);
 
   const s = sums.rows[0];
-  const expected = round2(Number(s.pump_sales) + Number(s.manual_sales) + Number(cp.total) - Number(ex.total));
+  const expected = round2(Number(s.pump_sales) + Number(s.manual_sales) - Number(ex.total));
   const cash = Number(body.cash || 0), transfer = Number(body.transfer || 0), pos = Number(body.pos || 0);
   const declared = round2(cash + transfer + pos);
   const variance = round2(declared - expected);
@@ -207,7 +205,7 @@ export async function closeShift(client, ctx, shiftId, body, { adminClose = fals
        cash_declared=$5, transfer_declared=$6, pos_declared=$7, pump_sales=$8, manual_sales=$9, credit_sales=$10,
        credit_payments=$11, till_expenses=$12, expected_amount=$13, variance_amount=$14, flags=$15 WHERE id=$16`,
     [now, ctx.user.id, adminClose, body.note || null, cash, transfer, pos, Number(s.pump_sales), Number(s.manual_sales),
-      Number(s.credit_sales), Number(cp.total), Number(ex.total), expected, variance, JSON.stringify(flags), shift.id]);
+      0, 0, Number(ex.total), expected, variance, JSON.stringify(flags), shift.id]);
 
   await audit(ctx, adminClose ? 'shift_admin_close' : 'shift_close', 'shift', shift.id, null,
     { expected, declared, variance, flags: flags.length }, body.note || null, client);

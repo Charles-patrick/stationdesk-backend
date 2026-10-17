@@ -9,17 +9,10 @@ import { notify } from '../utils/notify.js';
 const router = Router();
 router.use(requireAuth, staffOrAdmin);
 
-export async function creditBalance(client, customerId) {
-  const { rows: [r] } = await client.query(
-    `SELECT COALESCE(SUM(CASE WHEN type = 'payment' THEN -amount ELSE amount END),0) AS balance
-       FROM credit_entries WHERE credit_customer_id = $1 AND NOT voided`, [customerId]);
-  return Number(r.balance);
-}
-
 router.post('/', wrap(async (req, res) => {
   const b = parse(z.object({
-    product_id: id, qty: z.coerce.number().positive(), payment: z.enum(['cash', 'transfer', 'pos', 'credit']).default('cash'),
-    credit_customer_id: id.optional().nullable(), unit_price: z.coerce.number().min(0).optional(),
+    product_id: id, qty: z.coerce.number().positive(), payment: z.enum(['cash', 'transfer', 'pos']).default('cash'),
+    unit_price: z.coerce.number().min(0).optional(),
     client_id: z.string().max(80).optional().nullable(), note: optStr,
   }), req.body);
 
@@ -28,8 +21,9 @@ router.post('/', wrap(async (req, res) => {
       const dupe = (await client.query('SELECT * FROM sales WHERE station_id = $1 AND client_id = $2', [req.stationId, b.client_id])).rows[0];
       if (dupe) return { sale: dupe, duplicate: true };
     }
+    if (req.user.role === 'admin') throw bad('Sales are recorded by attendants on their shifts. Admins can review and correct them.');
     const { rows: [shift] } = await client.query("SELECT * FROM shifts WHERE user_id = $1 AND status = 'open'", [req.user.id]);
-    if (!shift && req.user.role === 'staff') throw bad('Start your shift before recording sales');
+    if (!shift) throw bad('Start your shift before recording sales');
     const { rows: [p] } = await client.query('SELECT * FROM products WHERE id = $1 AND station_id = $2 AND active FOR UPDATE', [b.product_id, req.stationId]);
     if (!p) throw bad('Product not found');
     if (p.sale_type === 'metered') throw bad('Fuel sales come from the pump readings when you close your shift');
@@ -38,29 +32,13 @@ router.post('/', wrap(async (req, res) => {
     }
     const price = p.sale_type === 'service' && b.unit_price !== undefined ? b.unit_price : Number(p.selling_price);
     const amount = round2(price * b.qty);
-    let creditCustomer = null;
-    if (b.payment === 'credit') {
-      if (!b.credit_customer_id) throw bad('Choose the credit customer');
-      creditCustomer = (await client.query('SELECT * FROM credit_customers WHERE id = $1 AND station_id = $2 AND active', [b.credit_customer_id, req.stationId])).rows[0];
-      if (!creditCustomer) throw bad('Credit customer not found');
-      const bal = await creditBalance(client, creditCustomer.id);
-      if (creditCustomer.credit_limit > 0 && bal + amount > creditCustomer.credit_limit) {
-        throw bad(`This would take ${creditCustomer.name} over their credit limit (owes ${bal}, limit ${creditCustomer.credit_limit})`);
-      }
-    }
     const { rows: [sale] } = await client.query(
-      `INSERT INTO sales (station_id, shift_id, product_id, product_name, qty, unit_price, amount, source, payment, credit_customer_id, client_id, note, entered_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'manual',$8,$9,$10,$11,$12) RETURNING *`,
+      `INSERT INTO sales (station_id, shift_id, product_id, product_name, qty, unit_price, amount, source, payment, client_id, note, entered_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'manual',$8,$9,$10,$11) RETURNING *`,
       [req.stationId, shift?.id || null, p.id, p.variant ? `${p.name} ${p.variant}` : p.name, b.qty, price, amount, b.payment,
-        creditCustomer?.id || null, b.client_id || null, b.note, req.user.id]);
+        b.client_id || null, b.note, req.user.id]);
     if (p.sale_type !== 'service') {
       await moveProduct(client, { stationId: req.stationId, productId: p.id, delta: -b.qty, type: 'sale', refType: 'sale', refId: sale.id, userId: req.user.id });
-    }
-    if (creditCustomer) {
-      await client.query(
-        `INSERT INTO credit_entries (station_id, credit_customer_id, type, amount, description, sale_id, shift_id, user_id)
-         VALUES ($1,$2,'sale',$3,$4,$5,$6,$7)`,
-        [req.stationId, creditCustomer.id, amount, `${b.qty} x ${sale.product_name}`, sale.id, shift?.id || null, req.user.id]);
     }
     await audit(req, 'sale_create', 'sale', sale.id, null, { product: sale.product_name, qty: sale.qty, amount }, null, client);
     return { sale, duplicate: false };
@@ -90,7 +68,6 @@ export async function applyVoid(client, ctx, sale, reason) {
   if (p && p.sale_type !== 'service') {
     await moveProduct(client, { stationId: sale.station_id, productId: sale.product_id, delta: Number(sale.qty), type: 'void', refType: 'sale', refId: sale.id, note: reason, userId: ctx.user.id });
   }
-  await client.query('UPDATE credit_entries SET voided = TRUE WHERE sale_id = $1', [sale.id]);
   await audit(ctx, 'sale_void', 'sale', sale.id, { amount: sale.amount, qty: sale.qty }, { voided: true }, reason, client);
 }
 
@@ -147,7 +124,6 @@ export async function applyQtyEdit(client, ctx, sale, qty, reason) {
     await moveProduct(client, { stationId: sale.station_id, productId: sale.product_id, delta: -diff, type: 'adjustment', refType: 'sale', refId: sale.id, note: `Sale quantity corrected: ${reason}`, userId: ctx.user.id });
   }
   await client.query('UPDATE sales SET qty = $1, amount = $2 WHERE id = $3', [qty, amount, sale.id]);
-  if (sale.payment === 'credit') await client.query("UPDATE credit_entries SET amount = $1 WHERE sale_id = $2 AND type = 'sale'", [amount, sale.id]);
   await audit(ctx, 'sale_edit', 'sale', sale.id, { qty: sale.qty, amount: sale.amount }, { qty, amount }, reason, client);
 }
 

@@ -37,9 +37,8 @@ router.get('/movements', wrap(async (req, res) => {
 router.post('/restock', wrap(async (req, res) => {
   const b = parse(z.object({
     product_id: id, tank_id: id.optional().nullable(), qty: z.coerce.number().positive(),
-    supplier_id: id.optional().nullable(), supplier_name: optStr, cost_price: z.coerce.number().min(0).optional().nullable(),
+    supplier_name: optStr, cost_price: z.coerce.number().min(0).optional().nullable(),
     waybill: optStr, dip_before: z.coerce.number().min(0).optional().nullable(), dip_after: z.coerce.number().min(0).optional().nullable(), note: optStr,
-    purchase_order_id: id.optional().nullable(),
   }), req.body);
   const row = await tx(async (client) => {
     const { rows: [p] } = await client.query('SELECT * FROM products WHERE id = $1 AND station_id = $2', [b.product_id, req.stationId]);
@@ -57,12 +56,11 @@ router.post('/restock', wrap(async (req, res) => {
         short = round2(b.qty - (b.dip_after - b.dip_before));
       }
     }
-    const supplier = b.supplier_id ? (await client.query('SELECT name FROM suppliers WHERE id = $1 AND station_id = $2', [b.supplier_id, req.stationId])).rows[0] : null;
     const { rows: [r] } = await client.query(
-      `INSERT INTO restocks (station_id, product_id, tank_id, supplier_id, supplier_name, qty, cost_price, waybill, dip_before, dip_after, short_delivery, note, purchase_order_id, received_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
-      [req.stationId, p.id, b.tank_id || null, b.supplier_id || null, supplier?.name || b.supplier_name, b.qty, b.cost_price ?? null, b.waybill,
-        b.dip_before ?? null, b.dip_after ?? null, short, b.note, b.purchase_order_id || null, req.user.id]);
+      `INSERT INTO restocks (station_id, product_id, tank_id, supplier_name, qty, cost_price, waybill, dip_before, dip_after, short_delivery, note, received_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+      [req.stationId, p.id, b.tank_id || null, b.supplier_name, b.qty, b.cost_price ?? null, b.waybill,
+        b.dip_before ?? null, b.dip_after ?? null, short, b.note, req.user.id]);
     if (p.sale_type === 'metered') {
       await moveTank(client, { stationId: req.stationId, tankId: b.tank_id, delta: b.qty, type: 'restock', refType: 'restock', refId: r.id, note: b.waybill, userId: req.user.id });
     } else {

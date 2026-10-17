@@ -26,6 +26,7 @@ router.post('/', wrap(async (req, res) => {
     role: z.enum(['staff', 'admin']), password: z.string().min(6), pin: z.string().regex(/^\d{4,6}$/).optional(),
     email: optStr, phone: optStr,
   }), req.body);
+  if (b.role === 'admin' && !b.email) throw bad('Admins log in with their email, so an email address is needed');
   const row = await one(
     `INSERT INTO users (station_id, role, name, username, email, phone, password_hash, pin_hash)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, name, username, role, status`,

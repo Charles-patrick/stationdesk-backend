@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS stations (
   loyalty_enabled BOOLEAN NOT NULL DEFAULT FALSE,
   loyalty_points_per_1000 INT NOT NULL DEFAULT 1,
   active BOOLEAN NOT NULL DEFAULT TRUE,
+  pending BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -165,23 +166,14 @@ CREATE TABLE IF NOT EXISTS pump_price_readings (
   UNIQUE (shift_pump_id, price_history_id)
 );
 
-CREATE TABLE IF NOT EXISTS credit_customers (
-  id BIGSERIAL PRIMARY KEY,
-  station_id BIGINT NOT NULL REFERENCES stations(id) ON DELETE CASCADE,
-  name TEXT NOT NULL,
-  company TEXT,
-  phone TEXT,
-  email TEXT,
-  credit_limit NUMERIC NOT NULL DEFAULT 0,
-  notes TEXT,
-  active BOOLEAN NOT NULL DEFAULT TRUE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
 CREATE TABLE IF NOT EXISTS orders (
   id BIGSERIAL PRIMARY KEY,
   station_id BIGINT NOT NULL REFERENCES stations(id) ON DELETE CASCADE,
-  customer_id BIGINT NOT NULL REFERENCES users(id),
+  customer_id BIGINT REFERENCES users(id),
+  customer_name TEXT,
+  customer_phone TEXT,
+  customer_email TEXT,
+  tracking_token TEXT NOT NULL DEFAULT replace(gen_random_uuid()::text, '-', ''),
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','confirmed','ready','completed','cancelled')),
   fulfilment TEXT NOT NULL DEFAULT 'pickup' CHECK (fulfilment IN ('pickup','delivery')),
   delivery_address TEXT,
@@ -221,7 +213,6 @@ CREATE TABLE IF NOT EXISTS sales (
   amount NUMERIC NOT NULL,
   source TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('manual','pump','order')),
   payment TEXT NOT NULL DEFAULT 'cash' CHECK (payment IN ('cash','transfer','pos','credit')),
-  credit_customer_id BIGINT REFERENCES credit_customers(id),
   order_id BIGINT REFERENCES orders(id),
   client_id TEXT,
   note TEXT,
@@ -234,20 +225,6 @@ CREATE TABLE IF NOT EXISTS sales (
 CREATE INDEX IF NOT EXISTS sales_station_date ON sales (station_id, created_at);
 CREATE INDEX IF NOT EXISTS sales_shift ON sales (shift_id);
 CREATE UNIQUE INDEX IF NOT EXISTS sales_client_id ON sales (station_id, client_id) WHERE client_id IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS credit_entries (
-  id BIGSERIAL PRIMARY KEY,
-  station_id BIGINT NOT NULL REFERENCES stations(id) ON DELETE CASCADE,
-  credit_customer_id BIGINT NOT NULL REFERENCES credit_customers(id) ON DELETE CASCADE,
-  type TEXT NOT NULL CHECK (type IN ('sale','payment','adjustment')),
-  amount NUMERIC NOT NULL,
-  description TEXT,
-  sale_id BIGINT REFERENCES sales(id) ON DELETE SET NULL,
-  shift_id BIGINT REFERENCES shifts(id) ON DELETE SET NULL,
-  user_id BIGINT REFERENCES users(id),
-  voided BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
 
 CREATE TABLE IF NOT EXISTS stock_movements (
   id BIGSERIAL PRIMARY KEY,
@@ -265,22 +242,11 @@ CREATE TABLE IF NOT EXISTS stock_movements (
 );
 CREATE INDEX IF NOT EXISTS stock_movements_product ON stock_movements (station_id, product_id, created_at);
 
-CREATE TABLE IF NOT EXISTS suppliers (
-  id BIGSERIAL PRIMARY KEY,
-  station_id BIGINT NOT NULL REFERENCES stations(id) ON DELETE CASCADE,
-  name TEXT NOT NULL,
-  phone TEXT,
-  email TEXT,
-  notes TEXT,
-  active BOOLEAN NOT NULL DEFAULT TRUE
-);
-
 CREATE TABLE IF NOT EXISTS restocks (
   id BIGSERIAL PRIMARY KEY,
   station_id BIGINT NOT NULL REFERENCES stations(id) ON DELETE CASCADE,
   product_id BIGINT NOT NULL REFERENCES products(id),
   tank_id BIGINT REFERENCES tanks(id),
-  supplier_id BIGINT REFERENCES suppliers(id),
   supplier_name TEXT,
   qty NUMERIC NOT NULL,
   cost_price NUMERIC,
@@ -290,29 +256,9 @@ CREATE TABLE IF NOT EXISTS restocks (
   short_delivery NUMERIC,
   note TEXT,
   photo_url TEXT,
-  purchase_order_id BIGINT,
   received_by BIGINT REFERENCES users(id),
   voided BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS purchase_orders (
-  id BIGSERIAL PRIMARY KEY,
-  station_id BIGINT NOT NULL REFERENCES stations(id) ON DELETE CASCADE,
-  supplier_id BIGINT REFERENCES suppliers(id),
-  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','sent','received','cancelled')),
-  note TEXT,
-  created_by BIGINT REFERENCES users(id),
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  received_at TIMESTAMPTZ
-);
-CREATE TABLE IF NOT EXISTS purchase_order_items (
-  id BIGSERIAL PRIMARY KEY,
-  purchase_order_id BIGINT NOT NULL REFERENCES purchase_orders(id) ON DELETE CASCADE,
-  product_id BIGINT NOT NULL REFERENCES products(id),
-  tank_id BIGINT REFERENCES tanks(id),
-  qty NUMERIC NOT NULL,
-  unit_cost NUMERIC
 );
 
 CREATE TABLE IF NOT EXISTS dip_readings (
@@ -344,14 +290,6 @@ CREATE TABLE IF NOT EXISTS expenses (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS expenses_client_id ON expenses (station_id, client_id) WHERE client_id IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS fleet_vehicles (
-  id BIGSERIAL PRIMARY KEY,
-  station_id BIGINT NOT NULL REFERENCES stations(id) ON DELETE CASCADE,
-  customer_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  plate TEXT NOT NULL,
-  label TEXT
-);
 
 CREATE TABLE IF NOT EXISTS edit_requests (
   id BIGSERIAL PRIMARY KEY,
@@ -421,3 +359,49 @@ CREATE TABLE IF NOT EXISTS job_runs (
   key TEXT PRIMARY KEY,
   ran_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Help guides each station can edit. New stations start with a copy of the platform's default guides (help_articles).
+CREATE TABLE IF NOT EXISTS station_help (
+  id BIGSERIAL PRIMARY KEY,
+  station_id BIGINT NOT NULL REFERENCES stations(id) ON DELETE CASCADE,
+  audience TEXT NOT NULL CHECK (audience IN ('customer','staff','admin')),
+  source_slug TEXT,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  video_url TEXT,
+  sort INT NOT NULL DEFAULT 0,
+  published BOOLEAN NOT NULL DEFAULT TRUE
+);
+CREATE INDEX IF NOT EXISTS station_help_station ON station_help (station_id, audience);
+
+-- ---------------------------------------------------------------
+-- Upgrades for databases created by the first version. Safe to run every time.
+-- ---------------------------------------------------------------
+ALTER TABLE stations ADD COLUMN IF NOT EXISTS pending BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE orders ALTER COLUMN customer_id DROP NOT NULL;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_name TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_phone TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_email TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS tracking_token TEXT DEFAULT replace(gen_random_uuid()::text, '-', '');
+UPDATE orders SET tracking_token = replace(gen_random_uuid()::text, '-', '') WHERE tracking_token IS NULL;
+ALTER TABLE orders ALTER COLUMN tracking_token SET NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS orders_tracking_token ON orders (tracking_token);
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'users') THEN
+    UPDATE orders o SET customer_name = u.name, customer_phone = u.phone, customer_email = u.email
+      FROM users u WHERE o.customer_id = u.id AND o.customer_name IS NULL;
+  END IF;
+END $$;
+-- Admins log in with their email, so an email can belong to only one admin account
+CREATE UNIQUE INDEX IF NOT EXISTS users_admin_email ON users (lower(email)) WHERE role = 'admin' AND email IS NOT NULL;
+
+-- Removed features: credit customers, suppliers and purchase orders, customer vehicles
+ALTER TABLE sales DROP COLUMN IF EXISTS credit_customer_id;
+ALTER TABLE restocks DROP COLUMN IF EXISTS supplier_id;
+ALTER TABLE restocks DROP COLUMN IF EXISTS purchase_order_id;
+DROP TABLE IF EXISTS credit_entries CASCADE;
+DROP TABLE IF EXISTS credit_customers CASCADE;
+DROP TABLE IF EXISTS purchase_order_items CASCADE;
+DROP TABLE IF EXISTS purchase_orders CASCADE;
+DROP TABLE IF EXISTS suppliers CASCADE;
+DROP TABLE IF EXISTS fleet_vehicles CASCADE;

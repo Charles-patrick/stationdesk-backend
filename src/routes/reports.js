@@ -48,11 +48,10 @@ router.get('/dashboard', wrap(async (req, res) => {
     `SELECT s.id, s.closed_at, s.variance_amount, s.flags, u.name AS user_name FROM shifts s JOIN users u ON u.id = s.user_id
       WHERE s.station_id = $1 AND s.status = 'closed' AND jsonb_array_length(s.flags) > 0 ORDER BY s.closed_at DESC LIMIT 6`, [st.id]);
   const approvals = await one("SELECT COUNT(*)::int AS n FROM edit_requests WHERE station_id = $1 AND status = 'pending'", [st.id]);
-  const owed = await one(`SELECT COALESCE(SUM(CASE WHEN type = 'payment' THEN -amount ELSE amount END),0) AS total FROM credit_entries WHERE station_id = $1 AND NOT voided`, [st.id]);
   const tanks = await many(
     `SELECT t.id, t.name, t.capacity_litres, t.current_litres, p.name AS product_name FROM tanks t JOIN products p ON p.id = t.product_id WHERE t.station_id = $1 AND t.active ORDER BY p.name, t.name`, [st.id]);
   res.json({ ...snapshot, today_expenses: expenses.total, top_today: byProduct, trend, open_shift_list: openShifts, low_stock_list: lowStock,
-    flagged_list: flagged, pending_approvals: approvals.n, credit_owed: owed.total, tanks });
+    flagged_list: flagged, pending_approvals: approvals.n, tanks });
 }));
 
 router.get('/sales', wrap(async (req, res) => {

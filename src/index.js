@@ -19,11 +19,10 @@ import shifts from './routes/shifts.js';
 import sales from './routes/sales.js';
 import inventory from './routes/inventory.js';
 import expenses from './routes/expenses.js';
-import credit from './routes/credit.js';
-import suppliers from './routes/suppliers.js';
 import orders from './routes/orders.js';
 import reports from './routes/reports.js';
 import exportsRoute from './routes/exports.js';
+import help from './routes/help.js';
 import { notifications, auditRouter, approvals } from './routes/misc.js';
 
 export function createApp() {
@@ -50,8 +49,7 @@ export function createApp() {
   app.use('/api/sales', sales);
   app.use('/api/inventory', inventory);
   app.use('/api/expenses', expenses);
-  app.use('/api/credit', credit);
-  app.use('/api/suppliers', suppliers);
+  app.use('/api/help', help);
   app.use('/api/orders', orders);
   app.use('/api/reports', reports);
   app.use('/api/exports', exportsRoute);

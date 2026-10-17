@@ -5,6 +5,9 @@ import { z, parse, wrap, bad, notFound, id, optStr } from '../utils/http.js';
 import { platformOnly } from '../middleware/auth.js';
 import { applyTemplate } from '../services/templates.js';
 import { audit } from '../utils/audit.js';
+import { upload, fileUrl } from '../services/uploads.js';
+import { copyDefaultHelp } from '../services/help.js';
+import { notify } from '../utils/notify.js';
 
 const router = Router();
 router.use(platformOnly);
@@ -12,7 +15,7 @@ router.use(platformOnly);
 const slugRe = /^[a-z0-9][a-z0-9-]{1,40}$/;
 
 router.get('/overview', wrap(async (_req, res) => {
-  const stations = await one('SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE active)::int AS active FROM stations');
+  const stations = await one('SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE active)::int AS active, COUNT(*) FILTER (WHERE pending)::int AS pending, COUNT(*) FILTER (WHERE NOT active AND NOT pending)::int AS paused FROM stations');
   const users = await one("SELECT COUNT(*) FILTER (WHERE role='staff')::int AS staff, COUNT(*) FILTER (WHERE role='customer')::int AS customers, COUNT(*) FILTER (WHERE role='admin')::int AS admins FROM users");
   const open = await one("SELECT COUNT(*)::int AS n FROM shifts WHERE status = 'open'");
   res.json({ stations, users, open_shifts: open.n });
@@ -22,10 +25,11 @@ router.get('/stations', wrap(async (_req, res) => {
   res.json(await many(
     `SELECT s.*,
        (SELECT COUNT(*)::int FROM users u WHERE u.station_id = s.id AND u.role IN ('staff','admin')) AS team,
-       (SELECT COUNT(*)::int FROM users u WHERE u.station_id = s.id AND u.role = 'customer') AS customers,
+       (SELECT COUNT(*)::int FROM orders o WHERE o.station_id = s.id) AS orders,
+       (SELECT u.name || ' (' || COALESCE(u.email, u.username) || ')' FROM users u WHERE u.station_id = s.id AND u.role = 'admin' ORDER BY u.id LIMIT 1) AS owner,
        (SELECT COUNT(*)::int FROM products p WHERE p.station_id = s.id AND p.active) AS products,
        (SELECT MAX(created_at) FROM sales x WHERE x.station_id = s.id) AS last_sale
-     FROM stations s ORDER BY s.created_at DESC`));
+     FROM stations s ORDER BY s.pending DESC, s.created_at DESC`));
 }));
 
 router.post('/stations', wrap(async (req, res) => {
@@ -38,16 +42,17 @@ router.post('/stations', wrap(async (req, res) => {
     admin_name: z.string().trim().min(2),
     admin_username: z.string().trim().toLowerCase().min(3),
     admin_password: z.string().min(6),
-    admin_email: optStr,
+    admin_email: z.string().trim().toLowerCase().email('The admin needs an email address to log in'),
   }), req.body);
   const result = await tx(async (client) => {
     const { rows: [station] } = await client.query(
       `INSERT INTO stations (slug, name, brand_color, address, phone, email, summary_email) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-      [body.slug, body.name, body.brand_color || '#F2A900', body.address, body.phone, body.email, body.admin_email || body.email]);
+      [body.slug, body.name, body.brand_color || '#F2A900', body.address, body.phone, body.email, body.admin_email]);
     const { rows: [admin] } = await client.query(
       `INSERT INTO users (station_id, role, name, username, email, password_hash) VALUES ($1,'admin',$2,$3,$4,$5) RETURNING id, name, username`,
       [station.id, body.admin_name, body.admin_username, body.admin_email, await bcrypt.hash(body.admin_password, 10)]);
     await applyTemplate(client, { stationId: station.id, user: req.user }, { template: body.template, fuels: [] });
+    await copyDefaultHelp(client, station.id);
     await audit({ ...req, stationId: station.id }, 'station_create', 'station', station.id, null, { name: station.name }, null, client);
     return { station, admin };
   });
@@ -65,6 +70,35 @@ router.patch('/stations/:id', wrap(async (req, res) => {
   if (!sets.length) throw bad('Nothing to change');
   vals.push(req.params.id);
   const row = await one(`UPDATE stations SET ${sets.join(', ')} WHERE id = $${vals.length} RETURNING *`, vals);
+  if (!row) throw notFound();
+  res.json(row);
+}));
+
+router.post('/stations/:id/approve', wrap(async (req, res) => {
+  const row = await one('UPDATE stations SET active = TRUE, pending = FALSE WHERE id = $1 RETURNING *', [req.params.id]);
+  if (!row) throw notFound();
+  await audit(req, 'station_approve', 'station', row.id, null, { name: row.name });
+  const admins = await many("SELECT id FROM users WHERE station_id = $1 AND role = 'admin'", [row.id]);
+  await notify({ stationId: row.id, userIds: admins.map((a) => a.id), type: 'account', title: 'Your station is approved', body: 'You can now log in and set up your station.', link: '/admin' });
+  res.json(row);
+}));
+
+router.post('/stations/:id/pause', wrap(async (req, res) => {
+  const row = await one('UPDATE stations SET active = FALSE WHERE id = $1 AND NOT pending RETURNING *', [req.params.id]);
+  if (!row) throw bad('That station is not running');
+  await audit(req, 'station_pause', 'station', row.id, null, { name: row.name });
+  res.json(row);
+}));
+
+router.post('/stations/:id/resume', wrap(async (req, res) => {
+  const row = await one('UPDATE stations SET active = TRUE WHERE id = $1 AND NOT pending RETURNING *', [req.params.id]);
+  if (!row) throw bad('That station is waiting for approval. Approve it instead.');
+  res.json(row);
+}));
+
+router.post('/stations/:id/logo', upload.single('file'), wrap(async (req, res) => {
+  if (!req.file) throw bad('Choose an image to upload');
+  const row = await one('UPDATE stations SET logo_url = $1 WHERE id = $2 RETURNING id, logo_url', [fileUrl(req.file), req.params.id]);
   if (!row) throw notFound();
   res.json(row);
 }));

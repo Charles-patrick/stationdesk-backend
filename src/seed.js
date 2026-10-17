@@ -7,6 +7,7 @@ import { HELP_ARTICLES } from './services/helpContent.js';
 import { applyTemplate } from './services/templates.js';
 import { recordInitialPrice } from './utils/pricing.js';
 import { moveProduct } from './utils/stock.js';
+import { copyDefaultHelp } from './services/help.js';
 
 // TotalEnergies price list (effective 1 October 2026). These are selling prices.
 const DRUMS = [
@@ -23,10 +24,17 @@ const PACKS = {
 };
 const SHOP = [['Bottled water 75cl', 300], ['Soft drink 50cl', 400], ['Solar lamp', 8500], ['Car air freshener', 1500]];
 
+// Guides from the first version that no longer apply (customer accounts, credit, suppliers)
+const OBSOLETE = ['customer-create-account', 'customer-vehicles', 'admin-credit', 'admin-ordering-settings'];
+
 export async function seedHelp() {
+  await pool.query('DELETE FROM help_articles WHERE slug = ANY($1)', [OBSOLETE]);
+  await pool.query('DELETE FROM station_help WHERE source_slug = ANY($1)', [OBSOLETE]);
   for (const a of HELP_ARTICLES) {
+    // Running setup again refreshes the standard guides to the latest text
     await pool.query(
-      `INSERT INTO help_articles (audience, slug, title, body, sort) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (slug) DO NOTHING`,
+      `INSERT INTO help_articles (audience, slug, title, body, sort) VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (slug) DO UPDATE SET audience = EXCLUDED.audience, title = EXCLUDED.title, body = EXCLUDED.body, sort = EXCLUDED.sort`,
       [a.audience, a.slug, a.title, a.body, a.sort]);
   }
 }
@@ -43,17 +51,14 @@ export async function seedDemo() {
   if (await one("SELECT id FROM stations WHERE slug = 'demo'")) return false;
   await tx(async (client) => {
     const { rows: [station] } = await client.query(
-      `INSERT INTO stations (slug, name, brand_color, address, phone, email, public_prices, loyalty_enabled)
-       VALUES ('demo','TotalEnergies Demo Station','#E2231A','Demo address, Nigeria','08000000000','admin@demo.test', FALSE, TRUE) RETURNING *`);
+      `INSERT INTO stations (slug, name, brand_color, address, phone, email)
+       VALUES ('demo','TotalEnergies Demo Station','#E2231A','Demo address, Nigeria','08000000000','admin@demo.test') RETURNING *`);
     const hash = (p) => bcrypt.hash(p, 10);
     const { rows: [admin] } = await client.query(
       `INSERT INTO users (station_id, role, name, username, email, password_hash) VALUES ($1,'admin','Demo Admin','admin','admin@demo.test',$2) RETURNING *`, [station.id, await hash('Admin123!')]);
     await client.query(
       `INSERT INTO users (station_id, role, name, username, password_hash, pin_hash) VALUES ($1,'staff','Ada Attendant','ada',$2,$3), ($1,'staff','Musa Attendant','musa',$4,$5)`,
       [station.id, await hash('Staff123!'), await hash('1234'), await hash('Staff123!'), await hash('4321')]);
-    await client.query(
-      `INSERT INTO users (station_id, role, name, username, email, phone, password_hash) VALUES ($1,'customer','Demo Customer','customer@example.com','customer@example.com','08011111111',$2)`,
-      [station.id, await hash('Customer123!')]);
     const ctx = { stationId: station.id, user: admin };
 
     // Prices below are demo values. Replace them with your real pump prices.
@@ -84,8 +89,7 @@ export async function seedDemo() {
     }
     for (const [n, price] of SHOP) await add('Miscellaneous', 'item', n, null, 'piece', price, 40, 10, false);
 
-    await client.query(`INSERT INTO suppliers (station_id, name, phone, email) VALUES ($1,'TotalEnergies Marketing Nigeria','08000000001',NULL)`, [station.id]);
-    await client.query(`INSERT INTO credit_customers (station_id, name, company, phone, credit_limit) VALUES ($1,'Sample Transport Ltd','Sample Transport Ltd','08022222222',500000)`, [station.id]);
+    await copyDefaultHelp(client, station.id);
   });
   return true;
 }
@@ -97,7 +101,7 @@ export async function seedAll() {
   console.log(`Platform owner ready: username "${config.owner.username}"`);
   if (config.seedDemo) {
     const made = await seedDemo();
-    console.log(made ? 'Demo station created at /s/demo (admin / Admin123!, ada / Staff123!, customer@example.com / Customer123!)' : 'Demo station already exists.');
+    console.log(made ? 'Demo station created. Store: /s/demo. Admin login: admin@demo.test / Admin123!. Staff login: station code demo, username ada, password Staff123! (PIN 1234).' : 'Demo station already exists.');
   }
 }
 

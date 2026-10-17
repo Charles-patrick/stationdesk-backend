@@ -17,12 +17,11 @@ router.patch('/', adminOnly, wrap(async (req, res) => {
   const body = parse(z.object({
     name: z.string().trim().min(2), brand_color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
     address: optStr, phone: optStr, email: optStr,
-    ordering_enabled: z.boolean(), public_prices: z.boolean(), signup_open: z.boolean(), customer_approval: z.boolean(),
+    ordering_enabled: z.boolean(),
     delivery_enabled: z.boolean(), delivery_note: optStr,
     shift_alert_hours: z.coerce.number().int().min(1).max(72),
     cash_tolerance_pct: z.coerce.number().min(0).max(20), litre_tolerance_pct: z.coerce.number().min(0).max(20),
     summary_enabled: z.boolean(), summary_hour: z.coerce.number().int().min(0).max(23), summary_email: optStr,
-    loyalty_enabled: z.boolean(), loyalty_points_per_1000: z.coerce.number().int().min(0).max(1000),
     timezone: z.string().min(3),
   }).partial(), req.body);
   if (body.timezone) {

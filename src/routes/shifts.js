@@ -22,9 +22,6 @@ async function shiftDetail(shiftId, stationId) {
   shift.dips = await many(
     'SELECT d.*, t.name AS tank_name FROM dip_readings d JOIN tanks t ON t.id = d.tank_id WHERE d.shift_id = $1', [shift.id]);
   shift.expenses = await many('SELECT * FROM expenses WHERE shift_id = $1 AND NOT voided ORDER BY created_at', [shift.id]);
-  shift.credit_payments_list = await many(
-    `SELECT e.*, c.name AS customer_name FROM credit_entries e JOIN credit_customers c ON c.id = e.credit_customer_id
-      WHERE e.shift_id = $1 AND e.type = 'payment' AND NOT e.voided`, [shift.id]);
   return shift;
 }
 
